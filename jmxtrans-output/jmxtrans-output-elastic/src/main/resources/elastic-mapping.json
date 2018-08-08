@@ -1,47 +1,48 @@
+
+//PUT _template/jmxtrans_template
 {
-  "jmx-entry": {
-    "properties": {
-      "serverAlias": {
-        "type": "string",
-        "index": "not_analyzed"
-      },
-      "server": {
-        "type": "string",
-        "index": "not_analyzed"
-      },
-      "port": {
-        "type": "string",
-        "index": "not_analyzed"
-      },
-      "objDomain": {
-        "type": "string",
-        "index": "not_analyzed"
-      },
-      "className": {
-        "type": "string",
-        "index": "not_analyzed"
-      },
-      "typeName": {
-        "type": "string",
-        "index": "not_analyzed"
-      },
-      "attributeName": {
-        "type": "string",
-        "index": "not_analyzed"
-      },
-      "key": {
-        "type": "string",
-        "index": "not_analyzed"
-      },
-      "keyAlias": {
-        "type": "string",
-        "index": "not_analyzed"
-      },
-      "value": {
-        "type": "double"
-      },
-      "timestamp": {
-        "type": "date"
+  "index_patterns": ["jmxtrans*"],
+  "settings": {
+    "number_of_shards": 6,
+    "number_of_replicas": 1
+  },
+  "mappings": {
+    "doc": {
+
+      "properties": {
+        "serverAlias": {
+          "type": "keyword"
+        },
+        "server": {
+          "type": "keyword"
+        },
+        "port": {
+          "type": "keyword"
+        },
+        "objDomain": {
+          "type": "keyword"
+        },
+        "className": {
+          "type": "keyword"
+        },
+        "typeName": {
+          "type": "keyword"
+        },
+        "attributeName": {
+          "type": "keyword"
+        },
+        "key": {
+          "type": "keyword"
+        },
+        "keyAlias": {
+          "type": "keyword"
+        },
+        "value": {
+          "type": "double"
+        },
+        "timestamp": {
+          "type": "date"
+        }
       }
     }
   }

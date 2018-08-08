@@ -1,17 +1,17 @@
 /**
  * The MIT License
  * Copyright © 2010 JmxTrans team
- *
+ * <p>
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- *
+ * <p>
  * The above copyright notice and this permission notice shall be included in
  * all copies or substantial portions of the Software.
- *
+ * <p>
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -22,32 +22,32 @@
  */
 package com.googlecode.jmxtrans.model.output.elastic;
 
+import com.alibaba.fastjson.JSONObject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.base.Charsets;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
-import com.google.common.io.Resources;
 import com.googlecode.jmxtrans.exceptions.LifecycleException;
 import com.googlecode.jmxtrans.model.Query;
 import com.googlecode.jmxtrans.model.Result;
 import com.googlecode.jmxtrans.model.Server;
 import com.googlecode.jmxtrans.model.ValidationException;
 import com.googlecode.jmxtrans.model.output.BaseOutputWriter;
-import io.searchbox.client.JestClient;
-import io.searchbox.client.JestClientFactory;
-import io.searchbox.client.JestResult;
-import io.searchbox.client.config.HttpClientConfig;
-import io.searchbox.core.Index;
-import io.searchbox.indices.CreateIndex;
-import io.searchbox.indices.IndicesExists;
-import io.searchbox.indices.mapping.PutMapping;
+import org.apache.http.HttpResponse;
+import org.apache.http.HttpStatus;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.concurrent.NotThreadSafe;
 import java.io.IOException;
-import java.net.URL;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -64,17 +64,22 @@ public class ElasticWriter extends BaseOutputWriter {
 
 	private static final Logger log = LoggerFactory.getLogger(ElasticWriter.class);
 
+	private static final String INDEX_OPERATION_NAME = "index";
+	private static final String INDEX_PARAM = "_index";
+	private static final String TYPE_PARAM = "_type";
+	private static final String BULK_ENDPOINT = "/_bulk";
+
 	private static final String DEFAULT_ROOT_PREFIX = "jmxtrans";
-	private static final String ELASTIC_TYPE_NAME = "jmx-entry";
+	private static final String ELASTIC_TYPE_NAME = "doc";
 
-	private static final Object CREATE_MAPPING_LOCK = new Object();
-
-	// injected for mockito unit tests: do not make final
-	private JestClient jestClient;
+	private HttpClient httpClient;
+	private StringBuilder bulkBuilder;
 
 	private final String rootPrefix;
 	private final String connectionUrl;
 	private final String indexName;
+
+	private DateFormat dateFormat;
 
 	@JsonCreator
 	public ElasticWriter(
@@ -90,35 +95,16 @@ public class ElasticWriter extends BaseOutputWriter {
 		super(typeNames, booleanAsNumber, debugEnabled, settings);
 
 		this.rootPrefix = firstNonNull(
-						rootPrefix,
-						(String) getSettings().get("rootPrefix"),
-						DEFAULT_ROOT_PREFIX);
+				rootPrefix,
+				DEFAULT_ROOT_PREFIX,
+				DEFAULT_ROOT_PREFIX);
 
 		this.connectionUrl = connectionUrl;
-		this.indexName = this.rootPrefix + "_jmx-entries";
-		this.jestClient = createJestClient(connectionUrl, username, password);
+		this.indexName = this.rootPrefix;
+		this.dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+
 	}
 
-	private JestClient createJestClient(String connectionUrl, String username, String password) {
-		log.info("Create a jest elastic search client for connection url [{}]", connectionUrl);
-		JestClientFactory factory = new JestClientFactory();
-		HttpClientConfig httpClientConfig;
-
-		if (username != null) {
-			log.info("Using HTTP Basic Authentication");
-			httpClientConfig = new HttpClientConfig.Builder(connectionUrl)
-					.defaultCredentials(username, password)
-					.multiThreaded(true)
-					.build();
-		} else {
-			httpClientConfig = new HttpClientConfig.Builder(connectionUrl)
-					.multiThreaded(true)
-					.build();
-		}
-
-		factory.setHttpClientConfig(httpClientConfig);
-		return factory.getObject();
-	}
 
 	@Override
 	protected void internalWrite(Server server, Query query, ImmutableList<Result> results) throws Exception {
@@ -140,53 +126,58 @@ public class ElasticWriter extends BaseOutputWriter {
 				map.put("timestamp", result.getEpoch());
 
 				log.debug("Insert into Elastic: Index: [{}] Type: [{}] Map: [{}]", indexName, ELASTIC_TYPE_NAME, map);
-				Index index = new Index.Builder(map).index(indexName).type(ELASTIC_TYPE_NAME).build();
-				JestResult addToIndex = jestClient.execute(index);
-				if (!addToIndex.isSucceeded()) {
-					throw new ElasticWriterException(String.format("Unable to write entry to elastic: %s", addToIndex.getErrorMessage()));
+				Map<String, Map<String, String>> parameters = new HashMap<String, Map<String, String>>();
+				Map<String, String> indexParameters = new HashMap<String, String>();
+				indexParameters.put(INDEX_PARAM, indexName + getDate());
+				indexParameters.put(TYPE_PARAM, ELASTIC_TYPE_NAME);
+				parameters.put(INDEX_OPERATION_NAME, indexParameters);
+
+				parameters.put(INDEX_OPERATION_NAME, indexParameters);
+				JSONObject json = new JSONObject(map);
+				synchronized (bulkBuilder) {
+					bulkBuilder.append(JSONObject.toJSON(parameters));
+					bulkBuilder.append("\n");
+					bulkBuilder.append(json.toJSONString());
+					bulkBuilder.append("\n");
 				}
+
 			} else {
 				log.warn("Unable to submit non-numeric value to Elastic: [{}] from result [{}]", result.getValue(), result);
 			}
 		}
-	}
 
-	private static void createMappingIfNeeded(JestClient jestClient, String indexName, String typeName) throws ElasticWriterException, IOException {
-		synchronized (CREATE_MAPPING_LOCK) {
-			IndicesExists indicesExists = new IndicesExists.Builder(indexName).build();
-			boolean indexExists = jestClient.execute(indicesExists).isSucceeded();
+		String entity;
+		synchronized (bulkBuilder) {
+			entity = bulkBuilder.toString();
+			bulkBuilder = new StringBuilder();
+		}
+		log.debug("Post Entity:" + entity);
+		HttpPost httpRequest = new HttpPost(connectionUrl + BULK_ENDPOINT);
+		httpRequest.setHeader("Content-Type", "application/x-ndjson");
+		httpRequest.setEntity(new StringEntity(entity, "UTF-8"));
+		HttpResponse response = httpClient.execute(httpRequest);
+		int statusCode = response.getStatusLine().getStatusCode();
+		log.debug("Status code from elasticsearch: " + statusCode);
+		if (response.getEntity() != null) {
+			log.debug("Status message from elasticsearch: " + EntityUtils.toString(response.getEntity(), "UTF-8"));
+		}
 
-			if (!indexExists) {
-
-				CreateIndex createIndex = new CreateIndex.Builder(indexName).build();
-				JestResult result = jestClient.execute(createIndex);
-				if (!result.isSucceeded()) {
-					throw new ElasticWriterException(String.format("Failed to create index: %s", result.getErrorMessage()));
-				} else {
-					log.info("Created index {}", indexName);
-				}
-
-				URL url = ElasticWriter.class.getResource("/elastic-mapping.json");
-				String mapping = Resources.toString(url, Charsets.UTF_8);
-
-				PutMapping putMapping = new PutMapping.Builder(indexName, typeName,mapping).build();
-
-				result = jestClient.execute(putMapping);
-				if (!result.isSucceeded()) {
-					throw new ElasticWriterException(String.format("Failed to create mapping: %s", result.getErrorMessage()));
-				}
-				else {
-					log.info("Created mapping for index {}", indexName);
-				}
+		if (statusCode != HttpStatus.SC_OK) {
+			if (response.getEntity() != null) {
+				throw new ElasticWriterException(EntityUtils.toString(response.getEntity(), "UTF-8"));
+			} else {
+				throw new ElasticWriterException("Elasticsearch status code was: " + statusCode);
 			}
 		}
 	}
+
 
 	@Override
 	public void start() throws LifecycleException {
 		super.start();
 		try {
-			createMappingIfNeeded(jestClient, indexName, ELASTIC_TYPE_NAME);
+			this.httpClient = HttpClients.createDefault();
+			this.bulkBuilder = new StringBuilder();
 		} catch (Exception e) {
 			throw new LifecycleException("Failed to create elastic mapping.", e);
 		}
@@ -195,7 +186,6 @@ public class ElasticWriter extends BaseOutputWriter {
 	@Override
 	public void close() throws LifecycleException {
 		super.close();
-		jestClient.shutdownClient();
 	}
 
 	@Override
@@ -211,5 +201,9 @@ public class ElasticWriter extends BaseOutputWriter {
 		sb.append(", indexName='").append(indexName).append('\'');
 		sb.append('}');
 		return sb.toString();
+	}
+
+	private String getDate() {
+		return dateFormat.format(new Date());
 	}
 }
